@@ -4,6 +4,7 @@ import glob
 import math
 import logging
 import numpy as np
+import io
 
 from skimage.io import imread
 import PIL
@@ -20,7 +21,7 @@ NUM_DATASET_WORKERS = 4
 SCALE_MIN = 0.75
 SCALE_MAX = 0.95
 DATASETS_DICT = {"openimages": "OpenImages", "cityscapes": "CityScapes", 
-                 "jetimages": "JetImages", "evaluation": "Evaluation"}
+                 "jetimages": "JetImages", "evaluation": "Evaluation", "imagenet": "ImageNet"}
 DATASETS = list(DATASETS_DICT.keys())
 
 def get_dataset(dataset):
@@ -66,6 +67,9 @@ def get_dataloaders(dataset, mode='train', root=None, shuffle=True, pin_memory=T
         dataset = Dataset(logger=logger, mode=mode, normalize=normalize, **kwargs)
     else:
         dataset = Dataset(root=root, logger=logger, mode=mode, normalize=normalize, **kwargs)
+
+    if isinstance(dataset, torch.utils.data.IterableDataset):
+        shuffle = False
 
     return DataLoader(dataset,
                       batch_size=batch_size,
@@ -291,6 +295,93 @@ class CityScapes(datasets.Cityscapes):
                          split=mode,
                          transform=self._transforms(scale=np.random.uniform(0.5,1.0), 
                             H=512, W=1024))
+
+class ImageNet(torch.utils.data.IterableDataset):
+    """ImageNet wrapper using Hugging Face datasets streaming."""
+    img_size = (3, 256, 256)
+    background_color = COLOUR_BLACK
+
+    def __init__(self, root=None, mode='train', crop_size=256, normalize=False, logger=None, **kwargs):
+        self.mode = mode
+        self.crop_size = crop_size
+        self.normalize = normalize
+        self.image_dims = (3, self.crop_size, self.crop_size)
+        self.scale_min = SCALE_MIN
+        self.scale_max = SCALE_MAX
+        
+        from datasets import load_dataset, Image
+        
+        if mode == 'train':
+            split = 'train'
+        elif mode == 'test':
+            split = 'test'
+        else:
+            split = 'validation'
+
+        self.dataset = load_dataset("ILSVRC/imagenet-1k", split=split, streaming=True, trust_remote_code=True)
+        # Disable automatic decoding to access raw bytes for bpp calculation
+        self.dataset = self.dataset.cast_column("image", Image(decode=False))
+
+    def _transforms(self, scale, H, W):
+        transforms_list = [
+                           transforms.RandomHorizontalFlip(),
+                           transforms.Resize((math.ceil(scale * H), math.ceil(scale * W))),
+                           transforms.RandomCrop(self.crop_size),
+                           transforms.ToTensor()]
+
+        if self.normalize is True:
+            transforms_list += [transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+
+        return transforms.Compose(transforms_list)
+
+    def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+        ds = self.dataset
+        if worker_info is not None:
+            try:
+                ds = ds.shard(num_shards=worker_info.num_workers, index=worker_info.id)
+            except AttributeError:
+                pass
+        
+        if self.mode == 'train':
+            ds = ds.shuffle(buffer_size=10000)
+            
+        for sample in ds:
+            try:
+                # Access raw bytes
+                image_file = sample['image']
+                bytes_content = image_file['bytes']
+                filesize = len(bytes_content)
+                
+                # Decode manually
+                img = PIL.Image.open(io.BytesIO(bytes_content))
+
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                
+                W, H = img.size
+                bpp = filesize * 8. / (H * W)
+
+                shortest_side_length = min(H,W)
+                minimum_scale_factor = float(self.crop_size) / float(shortest_side_length)
+                scale_low = max(minimum_scale_factor, self.scale_min)
+                scale_high = max(scale_low, self.scale_max)
+                scale = np.random.uniform(scale_low, scale_high)
+
+                dynamic_transform = self._transforms(scale, H, W)
+                transformed = dynamic_transform(img)
+                
+                yield transformed, bpp
+            except Exception:
+                continue
+
+    def __len__(self):
+        if self.mode == 'train':
+            return 1281167
+        elif self.mode == 'test':
+            return 100000
+        else:
+            return 50000
 
 def preprocess(root, size=(64, 64), img_format='JPEG', center_crop=None):
     """Preprocess a folder of images.
