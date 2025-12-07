@@ -36,6 +36,7 @@ def prepare_dataloader(args, input_dir, output_dir, batch_size=1):
 
     # `batch_size` must be 1 for images of different shapes
     input_images = glob.glob(os.path.join(input_dir, '*.jpg'))
+    input_images += glob.glob(os.path.join(input_dir, '*.jpeg'))
     input_images += glob.glob(os.path.join(input_dir, '*.JPEG'))
     input_images += glob.glob(os.path.join(input_dir, '*.png'))
     assert len(input_images) > 0, 'No valid image files found in supplied directory!'
@@ -230,6 +231,7 @@ def main(**kwargs):
     args = parser.parse_args()
 
     input_images = glob.glob(os.path.join(args.image_dir, '*.jpg'))
+    input_images += glob.glob(os.path.join(args.image_dir, '*.jpeg'))
     input_images += glob.glob(os.path.join(args.image_dir, '*.JPEG'))
     input_images += glob.glob(os.path.join(args.image_dir, '*.png'))
 
