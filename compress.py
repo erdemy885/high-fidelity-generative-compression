@@ -36,6 +36,7 @@ def prepare_dataloader(args, input_dir, output_dir, batch_size=1):
 
     # `batch_size` must be 1 for images of different shapes
     input_images = glob.glob(os.path.join(input_dir, '*.jpg'))
+    input_images += glob.glob(os.path.join(input_dir, '*.JPEG'))
     input_images += glob.glob(os.path.join(input_dir, '*.png'))
     assert len(input_images) > 0, 'No valid image files found in supplied directory!'
     print('Input images')
@@ -198,8 +199,10 @@ def compress_and_decompress(args):
         df['PSNR'] = PSNR_total.cpu().numpy()
         df['MS_SSIM'] = MS_SSIM_total.cpu().numpy()
 
-    df_path = os.path.join(args.output_dir, 'compression_metrics.h5')
-    df.to_hdf(df_path, key='df')
+    # df_path = os.path.join(args.output_dir, 'compression_metrics.h5')
+    # df.to_hdf(df_path, key='df')
+    df_path = os.path.join(args.output_dir, 'compression_metrics.csv')
+    df.to_csv(df_path, index=False)
 
     pprint(df)
 
@@ -227,6 +230,7 @@ def main(**kwargs):
     args = parser.parse_args()
 
     input_images = glob.glob(os.path.join(args.image_dir, '*.jpg'))
+    input_images += glob.glob(os.path.join(args.image_dir, '*.JPEG'))
     input_images += glob.glob(os.path.join(args.image_dir, '*.png'))
 
     assert len(input_images) > 0, 'No valid image files found in supplied directory!'
