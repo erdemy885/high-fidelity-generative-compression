@@ -36,8 +36,6 @@ def prepare_dataloader(args, input_dir, output_dir, batch_size=1):
 
     # `batch_size` must be 1 for images of different shapes
     input_images = glob.glob(os.path.join(input_dir, '*.jpg'))
-    input_images += glob.glob(os.path.join(input_dir, '*.jpeg'))
-    input_images += glob.glob(os.path.join(input_dir, '*.JPEG'))
     input_images += glob.glob(os.path.join(input_dir, '*.png'))
     assert len(input_images) > 0, 'No valid image files found in supplied directory!'
     print('Input images')
@@ -141,54 +139,74 @@ def compress_and_decompress(args):
     start_time = time.time()
 
     with torch.no_grad():
-
         for idx, (data, bpp, filenames) in enumerate(tqdm(eval_loader), 0):
             data = data.to(device, dtype=torch.float)
             B = data.size(0)
-            input_filenames_total.extend(filenames)
 
-            if args.reconstruct is True:
-                # Reconstruction without compression
-                reconstruction, q_bpp = model(data, writeout=False)
-            else:
-                # Perform entropy coding
-                compressed_output = model.compress(data)
-
-                if args.save is True:
-                    assert B == 1, 'Currently only supports saving single images.'
-                    compression_utils.save_compressed_format(compressed_output, 
-                        out_path=os.path.join(args.output_dir, f"{filenames[0]}_compressed.hfc"))
-
-                reconstruction = model.decompress(compressed_output)
-                q_bpp = compressed_output.total_bpp
-
-            if args.normalize_input_image is True:
-                # [-1., 1.] -> [0., 1.]
-                data = (data + 1.) / 2.
-
-            perceptual_loss = perceptual_loss_fn.forward(reconstruction, data, normalize=True)
-
-            if args.metrics is True:
-                # [0., 1.] -> [0., 255.]
-                psnr = metrics.psnr(reconstruction.cpu().numpy() * max_value, data.cpu().numpy() * max_value, max_value)
-                ms_ssim = MS_SSIM_func(reconstruction * max_value, data * max_value)
-                PSNR_total[n:n + B] = torch.Tensor(psnr)
-                MS_SSIM_total[n:n + B] = ms_ssim.data
-
-            for subidx in range(reconstruction.shape[0]):
-                if B > 1:
-                    q_bpp_per_im = float(q_bpp.cpu().numpy()[subidx])
+            try:
+                if args.reconstruct is True:
+                    # Reconstruction without compression
+                    reconstruction, q_bpp = model(data, writeout=False)
                 else:
-                    q_bpp_per_im = float(q_bpp.item()) if type(q_bpp) == torch.Tensor else float(q_bpp)
+                    # Perform entropy coding
+                    compressed_output = model.compress(data)
 
-                fname = os.path.join(args.output_dir, "{}_RECON_{:.3f}bpp.png".format(filenames[subidx], q_bpp_per_im))
-                torchvision.utils.save_image(reconstruction[subidx], fname, normalize=True)
-                output_filenames_total.append(fname)
+                    if args.save is True:
+                        assert B == 1, 'Currently only supports saving single images.'
+                        compression_utils.save_compressed_format(compressed_output, 
+                            out_path=os.path.join(args.output_dir, f"{filenames[0]}_compressed.hfc"))
+                        
+                    reconstruction = model.decompress(compressed_output)
+                    q_bpp = compressed_output.total_bpp
 
-            bpp_total[n:n + B] = bpp.data
-            q_bpp_total[n:n + B] = q_bpp.data if type(q_bpp) == torch.Tensor else q_bpp
-            LPIPS_total[n:n + B] = perceptual_loss.data
-            n += B
+                # [NOTE] Filename recording moved to END of block to prevent mismatches
+
+                if args.normalize_input_image is True:
+                    # [-1., 1.] -> [0., 1.]
+                    data = (data + 1.) / 2.
+
+                perceptual_loss = perceptual_loss_fn.forward(reconstruction, data, normalize=True)
+
+                if args.metrics is True:
+                    # [0., 1.] -> [0., 255.]
+                    psnr = metrics.psnr(reconstruction.cpu().numpy() * max_value, data.cpu().numpy() * max_value, max_value)
+                    # This line below was causing the crash for small images
+                    ms_ssim = MS_SSIM_func(reconstruction * max_value, data * max_value)
+                    
+                    PSNR_total[n:n + B] = torch.Tensor(psnr)
+                    MS_SSIM_total[n:n + B] = ms_ssim.data
+
+                for subidx in range(reconstruction.shape[0]):
+                    if B > 1:
+                        q_bpp_per_im = float(q_bpp.cpu().numpy()[subidx])
+                    else:
+                        q_bpp_per_im = float(q_bpp.item()) if type(q_bpp) == torch.Tensor else float(q_bpp)
+                    
+                    fname = os.path.join(args.output_dir, "{}_RECON_{:.3f}bpp.png".format(filenames[subidx], q_bpp_per_im))
+                    torchvision.utils.save_image(reconstruction[subidx], fname, normalize=True)
+                    output_filenames_total.append(fname)
+
+                bpp_total[n:n + B] = bpp.data
+                q_bpp_total[n:n + B] = q_bpp.data if type(q_bpp) == torch.Tensor else q_bpp
+                LPIPS_total[n:n + B] = perceptual_loss.data
+                
+                # Only add the filename if we survived all the potential errors above!
+                input_filenames_total.extend(filenames)
+                n += B
+
+            except (RuntimeError, AssertionError) as e:
+                # Catch both Padding errors (RuntimeError) and MS-SSIM size errors (AssertionError)
+                if "Padding size should be less" in str(e) or "Image size should be larger" in str(e):
+                    print(f"\n[WARNING] Skipping {filenames[0]} - Image too small.")
+                    continue
+                else:
+                    raise e
+    
+    bpp_total = bpp_total[:n]
+    q_bpp_total = q_bpp_total[:n]
+    LPIPS_total = LPIPS_total[:n]
+    PSNR_total = PSNR_total[:n]
+    MS_SSIM_total = MS_SSIM_total[:n]
 
     df = pd.DataFrame([input_filenames_total, output_filenames_total]).T
     df.columns = ['input_filename', 'output_filename']
@@ -231,8 +249,6 @@ def main(**kwargs):
     args = parser.parse_args()
 
     input_images = glob.glob(os.path.join(args.image_dir, '*.jpg'))
-    input_images += glob.glob(os.path.join(args.image_dir, '*.jpeg'))
-    input_images += glob.glob(os.path.join(args.image_dir, '*.JPEG'))
     input_images += glob.glob(os.path.join(args.image_dir, '*.png'))
 
     assert len(input_images) > 0, 'No valid image files found in supplied directory!'
